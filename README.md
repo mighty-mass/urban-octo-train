@@ -20,9 +20,12 @@ Plan:
     - Polling or pushing events? Why?
     - SEC Access to PDF content
     - Multi URL structure
-- [ ] Refine code part and structure (with AI)
+    - Keep both HTML and PDF (structure tree vs human readability/print)
+- [x] Refine code part and structure (with AI)
+    - Fix last-mile PDF content
 - [ ] Search database options
     - Postgres?
+        - Good candidate for LanceDB?   
     - Why not something else?
     - What other people use and why?
 
