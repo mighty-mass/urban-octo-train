@@ -25,5 +25,5 @@ Plan:
     - What other people use and why?
 
 
-For <ins>AI prompt</ins> used check [here](PromptList.md)
+AI prompt used: [PromptList.md]
 
