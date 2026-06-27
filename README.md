@@ -6,13 +6,14 @@ The goal of the assignment is to fetch the latest 10k documents related to a spe
 How to execute the code:
 ```
 uv sync
+uv run playwright install
 uv run python main.py
 ```
 
 
 Plan:
-- [ ] Learn about SEC Edgar API 
-- [ ] First manual mock up (try no AI for deep understanding)
+- [x] Learn about SEC Edgar API 
+- [x] First manual mock up (try no AI for deep understanding)
 - [ ] Collect pain points
     - Companies lookup questions (exact match?)
     - Metadata for documents?

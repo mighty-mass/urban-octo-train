@@ -4,6 +4,8 @@ import polars as pl
 from datetime import datetime
 
 from loguru import logger
+from pathlib import Path
+from playwright import sync_api
 
 # Mandatory headers for SEC requests, as per their guidelines
 # https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data#FairAccess
@@ -28,9 +30,9 @@ def build_company_lookup_table():
 
     try:
         response = httpx.get(url, headers=HEADERS).json()
-        data = {"cik_str": [], "ticker": [], "title": []}
+        data = {"cik": [], "ticker": [], "title": []}
         for item in response.values():
-            data["cik_str"].append(item["cik_str"])
+            data["cik"].append(item["cik_str"])
             data["ticker"].append(item["ticker"])
             data["title"].append(item["title"].upper())
 
@@ -42,6 +44,22 @@ def build_company_lookup_table():
 
     pl.from_dict(data).write_csv(f"{TABLE_ROOT_PATH}/company_lookup_table.csv")
     logger.info("Company lookup table built successfully.")
+
+
+def get_ticker_from_company_cik(cik: str) -> str:
+    """
+    Get the ticker for a given company CIK.
+    """
+
+    # Load the CIKs from the SEC's company tickers JSON file
+    df = pl.read_csv(f"{TABLE_ROOT_PATH}/company_lookup_table.csv")
+
+    filtered_row = df.filter(pl.col("cik") == cik)
+    if filtered_row.height > 0:
+        return filtered_row.select("ticker").to_series().to_list()[0]
+    else:
+        logger.warning(f"No ticker found for CIK: {cik}")
+        return None
 
 
 def get_companies_tickers(company_name: str) -> list[str]:
@@ -74,7 +92,7 @@ def get_companies_cik_from_tickers(tickers: list[str]) -> list[str]:
             df = pl.read_csv(f"{TABLE_ROOT_PATH}/company_lookup_table.csv")
 
             filtered_row = df.filter(pl.col("ticker") == ticker.upper())
-            results.extend(filtered_row.select("cik_str").to_series().to_list())
+            results.extend(filtered_row.select("cik").to_series().to_list())
         else:
             results.append(MAP_TICKER_TO_CIKS[ticker])
 
@@ -88,6 +106,8 @@ def get_10k_info_for_company(cik: str):
     """
 
     COMPANY_FORM = "10-K"
+
+    # NOTE: Try cached results first, to avoid unnecessary requests to the SEC's EDGAR system
     try:
         companies_10k_table = pl.read_csv(f"{TABLE_ROOT_PATH}/companies_10k_table.csv")
         filtered_row = companies_10k_table.filter(
@@ -118,9 +138,9 @@ def get_10k_info_for_company(cik: str):
     # NOTE: The SEC's EDGAR system provides a JSON endpoint for company concepts,
     # More info at https://www.sec.gov/search-filings/edgar-application-programming-interfaces#data.sec.gov/api/xbrl/frames/
     # which includes the latest filings. The URL format is:
-    companyConceptUrl = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/us-gaap/AccountsPayableCurrent.json"
+    company_concept_url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{str(cik).zfill(STD_CIK_LENGTH)}/us-gaap/AccountsPayableCurrent.json"
     try:
-        response = httpx.get(companyConceptUrl, headers=HEADERS)
+        response = httpx.get(company_concept_url, headers=HEADERS)
         if response.status_code == 200:
             data_dict = response.json()
 
@@ -142,15 +162,53 @@ def get_10k_info_for_company(cik: str):
                     f"Latest 10-K filing for CIK: {cik} is from {latest_10k_filing['fy']}, which is not the current year."
                 )
 
-            https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/{latest_10k_filing['frame']}.json
+            fetchXblrDataUrl = f"https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/{latest_10k_filing['frame']}.json"
+            try:
+                response = httpx.get(fetchXblrDataUrl, headers=HEADERS)
+                if response.status_code == 200:
+                    file_list_data = response.json()["data"]
+                    filtered_file_list_data = list(
+                        filter(lambda f: f["cik"] == cik, file_list_data)
+                    )[0]
 
-            # TODO: Fetch the xbrl frame for the latest 10-K filing
+                    ticker = get_ticker_from_company_cik(cik)
 
-            # TODO: Store the latest 10-K filing in PDF under output/TICKER/YEAR/COMPANY_FORM/<file_name>.pdf 
-            # and the metadata info in the companies_10k_table.csv for future reference. Pick ticker from lookup table
+                    base_archives_edgar_url = f"https://www.sec.gov/Archives/edgar/data"
+                    file_enpoint = f"{filtered_file_list_data['cik']}/{filtered_file_list_data['accn'].replace('-', '')}/{ticker.lower()}-{filtered_file_list_data['end'].replace('-', '')}.html"
 
-            
-        
+                    with sync_api.sync_playwright() as p:
+                        browser = p.chromium.launch(headless=True)
+                        context = browser.new_context()
+                        context.set_extra_http_headers(
+                            {**HEADERS, "Host": "www.sec.gov"}
+                        )
+                        page = context.new_page()
+                        logger.info(f"Working on: {file_enpoint}")
+                        file_full_url = f"{base_archives_edgar_url}/{file_enpoint}"
+
+                        root_path = Path(OUTPUT_ROOT_PATH)
+                        pdf_path = (
+                            root_path
+                            / ticker
+                            / str(latest_10k_filing["fy"])
+                            / COMPANY_FORM
+                            / f"{ticker}-{latest_10k_filing['fy']}.pdf"
+                        )
+                        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        page.goto(
+                            file_full_url,
+                            wait_until="networkidle",
+                        )
+                        output = page.pdf(format="A4", landscape=False)
+                        pdf_path.write_bytes(output)
+
+            except httpx.RequestError as e:
+                logger.error(
+                    f"An error occurred while requesting {fetchXblrDataUrl}: {e}"
+                )
+                raise e
+
             return data_dict
         else:
             logger.error(f"Failed to fetch 10-K info for CIK: {cik}")
@@ -158,18 +216,14 @@ def get_10k_info_for_company(cik: str):
                 f"Status code: {response.status_code} Response: {response.text}"
             )
     except httpx.RequestError as e:
-        logger.error(f"An error occurred while requesting {companyConceptUrl}: {e}")
-    except Exception as e:
-        logger.info(f"Finished fetching 10-K info for CIK: {cik}")
+        logger.error(f"An error occurred while requesting {company_concept_url}: {e}")
 
 
 if __name__ == "__main__":
     build_company_lookup_table()
     tickers = get_companies_tickers("Apple")
     ciks = get_companies_cik_from_tickers(tickers)
-    std_ciks = [str(cik).zfill(STD_CIK_LENGTH) for cik in ciks]
-    print(std_ciks)
 
-    for cik in std_ciks:
+    for cik in ciks:
         info = get_10k_info_for_company(cik)
         # print(info)
