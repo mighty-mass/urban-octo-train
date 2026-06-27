@@ -18,13 +18,13 @@ Plan:
     - Companies lookup questions (exact match?)
     - Metadata for documents?
     - Polling or pushing events? Why?
-    - 
+    - SEC Access to PDF content
+    - Multi URL structure
 - [ ] Refine code part and structure (with AI)
 - [ ] Search database options
-    - Postgres or LanceDB?
+    - Postgres?
     - Why not something else?
     - What other people use and why?
-
 
 For <ins>AI prompt</ins> used check [here](PromptList.md)
 
